@@ -1,0 +1,476 @@
+from flask import Flask, request, jsonify
+import anthropic
+import requests
+import json
+import os
+
+app = Flask(**name**)
+
+# =======================================
+
+# CONFIGURACION
+
+# =======================================
+
+ANTHROPIC_API_KEY  = os.environ.get(“ANTHROPIC_API_KEY”)
+TELEGRAM_BOT_TOKEN = os.environ.get(“TELEGRAM_BOT_TOKEN”)
+TELEGRAM_CHAT_ID   = os.environ.get(“TELEGRAM_CHAT_ID”)
+CALIFICACION_MINIMA = 7
+
+# =======================================
+
+# CONTEXTO WYCKOFF PARA CLAUDE
+
+# =======================================
+
+CONTEXTO_WYCKOFF = “””
+Eres un analista experto en la metodologia
+de Richard Wyckoff aplicada a futuros de
+indices americanos MNQ y MES.
+
+Tu unica funcion es analizar setups de
+Wyckoff y calificarlos del 1 al 10.
+
+SISTEMA DE CALIFICACION (Total 10 puntos):
+
+1. CONTRASTE DE VOLUMEN (0-3 puntos)
+   El criterio MAS importante de Wyckoff.
+   Compara el volumen del evento original
+   vs el volumen del test actual.
+   
+   Contraste 5x o mas   -> 3 puntos
+   Contraste 3x - 4x    -> 2 puntos
+   Contraste 2x - 3x    -> 1 punto
+   Menor de 2x          -> 0 puntos
+   
+   EXCEPCION para Creek Jump e Ice Break:
+   Estos NO tienen test. Evalua el volumen
+   del evento vs el promedio:
+   Volumen 3x o mas     -> 3 puntos
+   Volumen 2x - 3x      -> 2 puntos
+   Volumen 1.5x - 2x    -> 1 punto
+   Menor de 1.5x        -> 0 puntos
+1. CALIDAD DEL EVENTO ORIGINAL (0-2 puntos)
+   
+   Para Spring y Upthrust:
+   Profundidad 3-15 puntos
+- cierre fuerte
+- volumen mayor 150% promedio -> 2 puntos
+  Profundidad 15-30 puntos
+- cierre correcto
+- volumen mayor 130%          -> 1 punto
+  Profundidad mayor 30 puntos
+  o volumen menor 130%          -> 0 puntos
+   
+   Para LPS y LPSY:
+   Minimo mas alto que spring
+- volumen bajo en retroceso
+- vela de rechazo fuerte      -> 2 puntos
+  Solo algunas condiciones      -> 1 punto
+  No cumple                     -> 0 puntos
+   
+   Para SOS y SOW:
+   Ruptura con volumen alto
+- vela de buen tamanio
+- sin rechazo inmediato       -> 2 puntos
+  Solo algunas condiciones      -> 1 punto
+  No cumple                     -> 0 puntos
+   
+   Para Creek Jump e Ice Break:
+   Vela mayor 1.5x ATR
+- volumen mayor 2x promedio
+- cierre en extremo           -> 2 puntos
+  Solo algunas condiciones      -> 1 punto
+  No cumple                     -> 0 puntos
+   
+   Para LPS en Markup y LPSY en Markdown:
+   Minimo o Maximo mas alto o bajo
+- volumen bajo en retroceso
+- rechazo en zona de valor    -> 2 puntos
+  Solo algunas condiciones      -> 1 punto
+  No cumple                     -> 0 puntos
+   
+   Para SOS en Markup y SOW en Markdown:
+   Ruptura de maximo o minimo intermedio
+- volumen alto en ruptura
+- pullback con volumen bajo   -> 2 puntos
+  Solo algunas condiciones      -> 1 punto
+  No cumple                     -> 0 puntos
+1. TIMING DEL TEST (0-2 puntos)
+   No aplica para Creek Jump e Ice Break.
+   Para todos los demas trades:
+   
+   5 a 13 velas desde el evento  -> 2 puntos
+   14 a 21 velas                 -> 1 punto
+   Fuera de ese rango            -> 0 puntos
+1. CALIDAD DEL RANGO (0-1 punto)
+   3 o mas toques al nivel clave
+- rango entre 60-300 puntos   -> 1 punto
+  Menos condiciones             -> 0 puntos
+1. ALINEACION TEMPORALIDADES (0-2 puntos)
+   4 temporalidades alineadas    -> 2 puntos
+   3 temporalidades              -> 1 punto
+   Menos de 3                    -> 0 puntos
+
+REGLAS IMPORTANTES:
+
+- Solo aprobar calificacion 7 o mas
+- Ser muy estricto con el volumen
+- El timing es critico en Wyckoff
+- Considerar obstaculos al target
+- Ajustar gestion si hay zonas en camino
+- Cada trade tiene su logica propia
+
+TRADES ALCISTAS:
+
+1. Spring - Trampa bajista en soporte
+1. Test del Spring - Regreso sin vendedores
+1. LPS - Ultimo soporte antes del markup
+1. SOS - Ruptura del rango con fuerza
+1. Creek Jump - Explosion alcista del rango
+1. LPS en Markup - Pullback en tendencia
+1. SOS en Markup - Ruptura en tendencia
+
+TRADES BAJISTAS:
+
+1. Upthrust - Trampa alcista en resistencia
+1. Test del Upthrust - Regreso sin compradores
+1. LPSY - Ultima oferta antes del markdown
+1. SOW - Ruptura del rango hacia abajo
+1. Ice Break - Explosion bajista del rango
+1. LPSY en Markdown - Pullback en tendencia
+1. SOW en Markdown - Ruptura en tendencia
+
+RESPONDE SIEMPRE EN ESTE JSON EXACTO
+SIN TEXTO ADICIONAL FUERA DEL JSON:
+{
+“calificacion”: 8.5,
+“decision”: “VALIDO”,
+“puntos”: {
+“contraste_volumen”: 2,
+“calidad_evento”: 2,
+“timing”: 2,
+“calidad_rango”: 1,
+“temporalidades”: 2
+},
+“analisis”: “Explicacion detallada aqui”,
+“gestion_recomendada”: {
+“entrada”: 19850,
+“stop_loss”: 19820,
+“target_1”: 19880,
+“target_2”: 19920,
+“parcial_en”: 19880,
+“porcentaje_parcial”: 60,
+“mover_be_en”: 19870,
+“advertencias”: “Texto aqui”
+},
+“emoji_calificacion”: “stars”
+}
+“””
+
+# =======================================
+
+# FUNCION: ANALIZAR CON CLAUDE
+
+# =======================================
+
+def analizar_con_claude(datos_trade):
+
+```
+cliente = anthropic.Anthropic(
+    api_key=ANTHROPIC_API_KEY
+)
+
+mensaje = cliente.messages.create(
+    model="claude-sonnet-4-20250514",
+    max_tokens=1000,
+    system=CONTEXTO_WYCKOFF,
+    messages=[
+        {
+            "role": "user",
+            "content": (
+                "Analiza este setup de Wyckoff y "
+                "calificalo segun el sistema de "
+                "puntos establecido.\n\n"
+                "DATOS DEL SETUP:\n"
+                + json.dumps(
+                    datos_trade,
+                    indent=2,
+                    ensure_ascii=False
+                )
+                + "\n\nResponde SOLO con el JSON. "
+                "Sin texto adicional fuera del JSON."
+            )
+        }
+    ]
+)
+
+respuesta = mensaje.content[0].text.strip()
+
+if "```json" in respuesta:
+    respuesta = respuesta.split(
+        "```json")[1].split("```")[0].strip()
+elif "```" in respuesta:
+    respuesta = respuesta.split(
+        "```")[1].split("```")[0].strip()
+
+return json.loads(respuesta)
+```
+
+# =======================================
+
+# FUNCION: FORMATEAR MENSAJE TELEGRAM
+
+# =======================================
+
+def formatear_mensaje(datos, analisis):
+
+```
+trade        = datos.get("trade", "")
+simbolo      = datos.get("simbolo", "")
+hora         = datos.get("hora", "")
+direccion    = datos.get("direccion", "")
+vol          = datos.get("volumen", {})
+rango        = datos.get("rango", {})
+evento       = datos.get("evento_original", {})
+zonas        = datos.get("zonas_en_camino", {})
+temps        = datos.get("temporalidades", {})
+gestion      = datos.get("gestion", {})
+puntos       = analisis.get("puntos", {})
+cal          = analisis.get("calificacion", 0)
+analisis_txt = analisis.get("analisis", "")
+gestion_rec  = analisis.get(
+    "gestion_recomendada", {})
+
+if cal >= 9:
+    header = "EXCEPCIONAL"
+    emoji_h = "🔥"
+else:
+    header = "VALIDO"
+    emoji_h = "🟡"
+
+if direccion == "LONG":
+    emoji_dir = "🟢 LONG"
+else:
+    emoji_dir = "🔴 SHORT"
+
+def check(val):
+    if "Confirmado" in str(val):
+        return "✅"
+    return "⚠️"
+
+prof = evento.get(
+    "profundidad_spring",
+    evento.get("profundidad_upthrust", "")
+)
+velas_ev = evento.get(
+    "velas_desde_spring",
+    evento.get("velas_desde_upthrust", "")
+)
+toques = rango.get(
+    "toques_soporte",
+    rango.get("toques_resistencia", "")
+)
+
+mensaje = (
+    f"{emoji_h} {trade.upper()}\n"
+    f"─────────────────────────────\n"
+    f"{simbolo} | {hora} | {emoji_dir}\n"
+    f"─────────────────────────────\n"
+    f"PUNTUACION WYCKOFF:\n"
+    f"Contraste volumen:  "
+    f"{puntos.get('contraste_volumen', 0)}/3\n"
+    f"Calidad evento:     "
+    f"{puntos.get('calidad_evento', 0)}/2\n"
+    f"Timing:             "
+    f"{puntos.get('timing', 0)}/2\n"
+    f"Calidad rango:      "
+    f"{puntos.get('calidad_rango', 0)}/1\n"
+    f"Temporalidades:     "
+    f"{puntos.get('temporalidades', 0)}/2\n"
+    f"─────────────────────────────\n"
+    f"TEMPORALIDADES:\n"
+    f"{check(temps.get('1H', ''))} "
+    f"1H:    {temps.get('1H', '')}\n"
+    f"{check(temps.get('30MIN', ''))} "
+    f"30MIN: {temps.get('30MIN', '')}\n"
+    f"{check(temps.get('10MIN', ''))} "
+    f"10MIN: {temps.get('10MIN', '')}\n"
+    f"✅ 5MIN:  Confirmacion entrada\n"
+    f"─────────────────────────────\n"
+    f"VOLUMEN:\n"
+    f"Contraste:    "
+    f"{vol.get('contraste_evento_test', '')}\n"
+    f"Vol actual:   "
+    f"{vol.get('relativo_actual', '')}\n"
+    f"Tendencia:    "
+    f"{vol.get('tendencia_rango', '')}\n"
+    f"─────────────────────────────\n"
+    f"EVENTO ORIGINAL:\n"
+    f"Profundidad:  {prof}\n"
+    f"Velas evento: {velas_ev}\n"
+    f"Ratio mecha:  "
+    f"{evento.get('ratio_mecha_cuerpo', '')}x\n"
+    f"─────────────────────────────\n"
+    f"RANGO:\n"
+    f"Tamanio:      "
+    f"{rango.get('tamanio_puntos', '')} pts\n"
+    f"Toques nivel: {toques}\n"
+    f"Posicion:     "
+    f"{rango.get('posicion_actual', '')}\n"
+    f"─────────────────────────────\n"
+    f"ZONAS EN EL CAMINO:\n"
+    f"Obstaculos:   "
+    f"{zonas.get('obstaculos', '0')}\n"
+    f"FVG presente: "
+    f"{zonas.get('fvg_presente', 'No')}\n"
+    f"Nivel redondo:"
+    f"{zonas.get('nivel_redondo_cercano', 'No')}\n"
+    f"─────────────────────────────\n"
+    f"TRADE:\n"
+    f"Entrada:  "
+    f"{gestion_rec.get('entrada', gestion.get('entrada', ''))}\n"
+    f"Stop:     "
+    f"{gestion_rec.get('stop_loss', gestion.get('stop_loss', ''))} 🔴\n"
+    f"Target 1: "
+    f"{gestion_rec.get('target_1', gestion.get('target_1', ''))} 🎯 "
+    f"({gestion_rec.get('porcentaje_parcial', 60)}%)\n"
+    f"Target 2: "
+    f"{gestion_rec.get('target_2', gestion.get('target_2', ''))} 🎯\n"
+    f"RR:       1:{gestion.get('RR', '')}\n"
+    f"Mover BE: "
+    f"{gestion_rec.get('mover_be_en', gestion.get('zona_BE', ''))}\n"
+    f"─────────────────────────────\n"
+    f"ANALISIS IA:\n"
+    f"{analisis_txt}\n"
+    f"─────────────────────────────\n"
+    f"CALIFICACION: {cal}/10\n"
+    f"DECISION: {header} {emoji_h}\n"
+    f"─────────────────────────────\n"
+    f"Confirma visualmente: 20%"
+)
+
+return mensaje.strip()
+```
+
+# =======================================
+
+# FUNCION: ENVIAR A TELEGRAM
+
+# =======================================
+
+def enviar_telegram(mensaje):
+
+```
+url = (
+    f"https://api.telegram.org/"
+    f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+)
+
+datos = {
+    "chat_id": TELEGRAM_CHAT_ID,
+    "text": mensaje
+}
+
+return requests.post(url, json=datos).json()
+```
+
+# =======================================
+
+# ENDPOINT PRINCIPAL - WEBHOOK
+
+# =======================================
+
+@app.route(’/webhook’, methods=[‘POST’])
+def webhook():
+
+```
+try:
+    datos = request.get_json()
+
+    if not datos:
+        return jsonify({
+            "error": "Sin datos"
+        }), 400
+
+    trade = datos.get('trade', 'Desconocido')
+    print(f"Trade recibido: {trade}")
+
+    analisis = analizar_con_claude(datos)
+    calificacion = analisis.get("calificacion", 0)
+
+    print(f"Calificacion: {calificacion}/10")
+
+    if calificacion >= CALIFICACION_MINIMA:
+
+        mensaje = formatear_mensaje(
+            datos, analisis)
+
+        enviar_telegram(mensaje)
+
+        print(f"Senal enviada: {trade} {calificacion}/10")
+
+        return jsonify({
+            "status": "senal enviada",
+            "trade": trade,
+            "calificacion": calificacion,
+            "decision": analisis.get("decision")
+        }), 200
+
+    else:
+        print(f"Rechazado: {trade} {calificacion}/10")
+
+        return jsonify({
+            "status": "rechazado",
+            "trade": trade,
+            "calificacion": calificacion,
+            "razon": f"Calificacion {calificacion} menor a {CALIFICACION_MINIMA}"
+        }), 200
+
+except Exception as e:
+    print(f"Error: {str(e)}")
+    return jsonify({"error": str(e)}), 500
+```
+
+# =======================================
+
+# ENDPOINT DE PRUEBA
+
+# =======================================
+
+@app.route(’/test’, methods=[‘GET’])
+def test():
+return jsonify({
+“status”: “Servidor funcionando”,
+“sistema”: “Wyckoff + Claude AI”,
+“trades_alcistas”: [
+“Spring”,
+“Test del Spring”,
+“LPS”,
+“SOS”,
+“Creek Jump”,
+“LPS en Markup”,
+“SOS en Markup”
+],
+“trades_bajistas”: [
+“Upthrust”,
+“Test del Upthrust”,
+“LPSY”,
+“SOW”,
+“Ice Break”,
+“LPSY en Markdown”,
+“SOW en Markdown”
+],
+“filtro_minimo”: CALIFICACION_MINIMA,
+“total_trades”: 14
+}), 200
+
+# =======================================
+
+# INICIAR SERVIDOR
+
+# =======================================
+
+if **name** == ‘**main**’:
+port = int(os.environ.get(“PORT”, 5000))
+app.run(host=‘0.0.0.0’, port=port)
